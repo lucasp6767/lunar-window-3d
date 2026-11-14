@@ -37,11 +37,17 @@ padding:10px;border-radius:8px;font-size:12px}
 </div>
 <div id="coords">Esperando terreno...</div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"
+  }
+}
+</script>
 <script type="module">
-import * as THREE from
-'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js';
-import {OrbitControls} from
-'https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/controls/OrbitControls.js';
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070b);
