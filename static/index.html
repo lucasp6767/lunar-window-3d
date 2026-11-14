@@ -33,7 +33,7 @@ padding:10px;border-radius:8px;font-size:12px}
 <label>Exageración vertical: <span id="scaleLabel">3×</span></label>
 <input id="scale" type="range" min="1" max="15" step="0.5" value="3">
 <p id="status">Cargando datos científicos...</p>
-<small>Arrastrar: rotar · Rueda: acercar · Clic derecho: desplazar</small>
+<small>Orbital: mouse para explorar · Superficie: WASD + arrastrar para mirar</small>
 </div>
 <div id="coords">Esperando terreno...</div>
 
@@ -155,20 +155,148 @@ async function loadTerrain(){
   status.textContent='Relieve LOLA cargado. Cargando LROC...';
 }
 
-document.getElementById('orbit').onclick=()=>{
+let surfaceMode = false;
+let yaw = 0;
+let pitch = 0;
+let dragging = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+let eyeHeight = 0.0017;
+const keys = new Set();
+const clock = new THREE.Clock();
+
+function groundHeight(x,z){
+  if(!terrainData) return 0;
+  const n = terrainData.width;
+  const gx = THREE.MathUtils.clamp(
+    (x/extentX+0.5)*(n-1),0,n-1);
+  const gz = THREE.MathUtils.clamp(
+    (0.5-z/extentY)*(n-1),0,n-1);
+  const x0=Math.floor(gx), z0=Math.floor(gz);
+  const x1=Math.min(x0+1,n-1);
+  const z1=Math.min(z0+1,n-1);
+  const tx=gx-x0, tz=gz-z0;
+  const a=THREE.MathUtils.lerp(
+    heights[z0*n+x0],heights[z0*n+x1],tx);
+  const b=THREE.MathUtils.lerp(
+    heights[z1*n+x0],heights[z1*n+x1],tx);
+  return THREE.MathUtils.lerp(a,b,tz)/1000*verticalScale;
+}
+
+function updateSurfaceLook(){
+  camera.rotation.order='YXZ';
+  camera.rotation.y=yaw;
+  camera.rotation.x=pitch;
+}
+
+function enterSurface(){
+  if(!terrainData)return;
+  surfaceMode=true;
+  controls.enabled=false;
+  keys.clear();
+  camera.position.set(0,groundHeight(0,0)+eyeHeight,0);
+  yaw=0;
+  pitch=0;
+  updateSurfaceLook();
+  status.textContent=
+    'Superficie: WASD para caminar · Arrastrar para mirar · Shift para acelerar';
+}
+
+function enterOrbit(){
+  surfaceMode=false;
+  dragging=false;
+  keys.clear();
+  controls.enabled=true;
   camera.position.set(110,130,150);
   controls.target.set(0,0,0);
+  camera.up.set(0,1,0);
   controls.update();
-};
+  status.textContent='Vista orbital NASA LOLA + LROC';
+}
 
-document.getElementById('surface').onclick=()=>{
-  const x=0,z=0;
-  const y=elevationAt(x,z);
-  camera.position.set(x,y+0.002,z);
-  controls.target.set(x+0.1,y+0.002,z-0.5);
-  controls.update();
-};
+document.getElementById('orbit').onclick=enterOrbit;
+document.getElementById('surface').onclick=enterSurface;
 
+renderer.domElement.addEventListener('pointerdown',e=>{
+  if(!surfaceMode || e.button!==0)return;
+  dragging=true;
+  lastMouseX=e.clientX;
+  lastMouseY=e.clientY;
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+
+renderer.domElement.addEventListener('pointermove',e=>{
+  if(!surfaceMode || !dragging)return;
+  yaw-=(e.clientX-lastMouseX)*0.003;
+  pitch-=(e.clientY-lastMouseY)*0.003;
+  pitch=THREE.MathUtils.clamp(pitch,-1.45,1.45);
+  lastMouseX=e.clientX;
+  lastMouseY=e.clientY;
+  updateSurfaceLook();
+});
+
+renderer.domElement.addEventListener('pointerup',()=>{
+  dragging=false;
+});
+renderer.domElement.addEventListener('pointercancel',()=>{
+  dragging=false;
+});
+
+addEventListener('keydown',e=>{
+  if(['KeyW','KeyA','KeyS','KeyD',
+      'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+      'ShiftLeft','ShiftRight'].includes(e.code)){
+    if(surfaceMode)e.preventDefault();
+    keys.add(e.code);
+  }
+});
+
+addEventListener('keyup',e=>keys.delete(e.code));
+addEventListener('blur',()=>keys.clear());
+
+function moveOnSurface(dt){
+  if(!surfaceMode || !terrainData)return;
+
+  const forward=Number(keys.has('KeyW')||keys.has('ArrowUp'))
+    -Number(keys.has('KeyS')||keys.has('ArrowDown'));
+  const sideways=Number(keys.has('KeyD')||keys.has('ArrowRight'))
+    -Number(keys.has('KeyA')||keys.has('ArrowLeft'));
+
+  const distance=Math.hypot(forward,sideways);
+
+  if(distance>0){
+    // Velocidades en kilómetros por segundo.
+    // Normal: 3 km/s. Shift: 10 km/s.
+    const speed=(keys.has('ShiftLeft')||
+      keys.has('ShiftRight'))?10:3;
+
+    const totalStep=speed*Math.min(dt,0.05);
+
+    // Dividir el movimiento en pasos cortos.
+    const steps=Math.max(1,Math.ceil(totalStep/0.01));
+    const step=totalStep/steps/distance;
+
+    for(let i=0;i<steps;i++){
+      const dx=(-Math.sin(yaw)*forward+
+        Math.cos(yaw)*sideways)*step;
+      const dz=(-Math.cos(yaw)*forward-
+        Math.sin(yaw)*sideways)*step;
+
+      camera.position.x=THREE.MathUtils.clamp(
+        camera.position.x+dx,-extentX/2+0.01,extentX/2-0.01);
+      camera.position.z=THREE.MathUtils.clamp(
+        camera.position.z+dz,-extentY/2+0.01,extentY/2-0.01);
+
+      // Mantener la cámara sobre la superficie.
+      camera.position.y=groundHeight(
+        camera.position.x,camera.position.z)+eyeHeight;
+    }
+  }
+
+  // Ajuste inmediato incluso cuando estamos quietos.
+  camera.position.y=groundHeight(
+    camera.position.x,camera.position.z)+eyeHeight;
+}
 document.getElementById('scale').oninput=e=>{
   verticalScale=Number(e.target.value);
   document.getElementById('scaleLabel').textContent=
@@ -192,19 +320,30 @@ document.getElementById('scale').oninput=e=>{
 
   positions.needsUpdate=true;
   geometry.computeVertexNormals();
+  if(surfaceMode){
+    camera.position.y=groundHeight(
+      camera.position.x,camera.position.z)+eyeHeight;
+  }
 };
 
 function animate(){
   requestAnimationFrame(animate);
-  controls.update();
+  const dt=clock.getDelta();
+
+  if(surfaceMode){
+    moveOnSurface(dt);
+  }else{
+    controls.update();
+  }
 
   if(terrainData){
-    const x=controls.target.x;
-    const z=controls.target.z;
+    const x=surfaceMode?camera.position.x:controls.target.x;
+    const z=surfaceMode?camera.position.z:controls.target.z;
     coords.textContent=
-      'X: '+x.toFixed(2)+' km | Y: '+
-      (-z).toFixed(2)+' km | Elevación relativa: '+
-      (elevationAt(x,z)/verticalScale*1000).toFixed(1)+' m';
+      'X: '+x.toFixed(3)+' km | Y: '+
+      (-z).toFixed(3)+' km | Elevación relativa: '+
+      (groundHeight(x,z)/verticalScale*1000).toFixed(1)+' m'+
+      (surfaceMode?' | Modo superficie':' | Modo orbital');
   }
 
   renderer.render(scene,camera);
