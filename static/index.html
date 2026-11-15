@@ -622,6 +622,616 @@ setInterval(() => {
     }
 }, 500);
 
+
+// LUNAR_CIELO_PANEL_V1
+// Ángulos topocéntricos NASA/JPL SPICE.
+// Horizonte geométrico, sin obstrucciones del relieve.
+
+const cieloPanel = document.createElement("div");
+cieloPanel.id = "cieloNASA";
+cieloPanel.style.cssText = `
+  position:fixed;
+  top:18px;
+  right:18px;
+  width:235px;
+  max-width:calc(100vw - 50px);
+  background:#101723ed;
+  border:1px solid #526580;
+  border-radius:12px;
+  padding:14px;
+  box-sizing:border-box;
+  color:white;
+  font:12px/1.6 Arial,sans-serif;
+  z-index:5;
+  pointer-events:none;
+  box-shadow:0 4px 20px #0008;
+`;
+
+cieloPanel.innerHTML = `
+  <div style="font-size:14px;font-weight:bold">
+    ☀️ Cielo lunar · NASA/JPL
+  </div>
+  <div id="cieloDatos" style="margin-top:8px">
+    Esperando datos astronómicos...
+  </div>
+  <div style="color:#aebdd0;font-size:10px;margin-top:8px">
+    Horizonte geométrico · Sin obstáculos del terreno
+  </div>
+`;
+
+document.body.appendChild(cieloPanel);
+
+let ultimaClaveCielo = "";
+let consultaCielo = 0;
+
+async function actualizarCieloNASA() {
+  if (!terrainData) return;
+
+  const x = surfaceMode
+    ? camera.position.x
+    : controls.target.x;
+
+  const z = surfaceMode
+    ? camera.position.z
+    : controls.target.z;
+
+  const punto = mapToLunar(x,z);
+  const fecha = simulationTime.toISOString();
+
+  // Redondeo solo para evitar consultas por movimientos
+  // imperceptibles de la cámara.
+  const lat = Number(punto.lat.toFixed(5));
+  const lon = Number(punto.lon.toFixed(5));
+
+  const clave = `${fecha}|${lat}|${lon}`;
+  if (clave === ultimaClaveCielo) return;
+
+  ultimaClaveCielo = clave;
+  const consulta = ++consultaCielo;
+
+  const datosDiv = document.getElementById("cieloDatos");
+  datosDiv.textContent = "Calculando posiciones...";
+
+  try {
+    const params = new URLSearchParams({
+      fecha,
+      lat: String(lat),
+      lon: String(lon)
+    });
+
+    const respuesta = await fetch("/api/cielo?" + params);
+
+    if (!respuesta.ok) {
+      throw new Error("HTTP " + respuesta.status);
+    }
+
+    const datos = await respuesta.json();
+
+    if (consulta !== consultaCielo) return;
+
+    const fmt = n => Number(n).toFixed(2) + "°";
+
+    datosDiv.innerHTML = `
+      <div style="color:#aebdd0">
+        Lat ${lat.toFixed(4)}° · Lon ${lon.toFixed(4)}°
+      </div>
+      <div style="margin-top:9px">
+        <b>☀️ SOL</b>
+        <div>Elevación: <b>${fmt(datos.sol.elevacion_grados)}</b></div>
+        <div>Azimut: ${fmt(datos.sol.azimut_grados)}</div>
+      </div>
+      <div style="margin-top:9px">
+        <b>🌍 TIERRA</b>
+        <div>Elevación: <b>${fmt(datos.tierra.elevacion_grados)}</b></div>
+        <div>Azimut: ${fmt(datos.tierra.azimut_grados)}</div>
+      </div>
+    `;
+
+  } catch (error) {
+    if (consulta !== consultaCielo) return;
+    ultimaClaveCielo = "";
+    datosDiv.textContent =
+      "No se pudo consultar /api/cielo: " + error.message;
+  }
+}
+
+// Consultas moderadas para no ralentizar Street View.
+setInterval(actualizarCieloNASA, 1500);
+
+
+// LUNAR_CLICK_STREETVIEW_V1
+// Clic sobre el relieve en vista orbital:
+// trasladar el observador a Street View lunar.
+
+const lunarClickRaycaster = new THREE.Raycaster();
+const lunarClickPointer = new THREE.Vector2();
+let lunarPointerStart = null;
+
+renderer.domElement.addEventListener("pointerdown", event => {
+  if (surfaceMode || event.button !== 0) return;
+
+  lunarPointerStart = {
+    x: event.clientX,
+    y: event.clientY
+  };
+});
+
+renderer.domElement.addEventListener("pointerup", event => {
+  if (surfaceMode || !lunarPointerStart) return;
+
+  const dx = event.clientX - lunarPointerStart.x;
+  const dy = event.clientY - lunarPointerStart.y;
+  lunarPointerStart = null;
+
+  // Arrastrar rota la cámara; un clic selecciona el terreno.
+  if (Math.hypot(dx, dy) > 5) return;
+  if (!terrainMesh || !terrainData) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+
+  lunarClickPointer.x =
+    ((event.clientX - rect.left) / rect.width) * 2 - 1;
+
+  lunarClickPointer.y =
+    -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  lunarClickRaycaster.setFromCamera(lunarClickPointer, camera);
+
+  const hits = lunarClickRaycaster.intersectObject(
+    terrainMesh, false
+  );
+
+  if (!hits.length) return;
+
+  const punto = hits[0].point;
+  const x = punto.x;
+  const z = punto.z;
+
+  const coordenadas = mapToLunar(x, z);
+
+  selectedLocation = {
+    x,
+    z,
+    lat: coordenadas.lat,
+    lon: coordenadas.lon
+  };
+
+  document.getElementById("latitude").value =
+    coordenadas.lat.toFixed(5);
+
+  document.getElementById("longitude").value =
+    coordenadas.lon.toFixed(5);
+
+  updateLocationMarker();
+  enterSurface();
+
+  status.textContent =
+    "Street View lunar · Lat " +
+    coordenadas.lat.toFixed(5) +
+    "° · Lon " +
+    coordenadas.lon.toFixed(5) + "°";
+});
+
+renderer.domElement.addEventListener("pointercancel", () => {
+  lunarPointerStart = null;
+});
+
+window.addEventListener("blur", () => {
+  lunarPointerStart = null;
+});
+
+
+// LUNAR_CIELO_REAL_V5
+// Posiciones NASA/JPL SPICE desde /api/cielo.
+// Proyección independiente del renderizado Three.js.
+
+const astroOverlay = document.createElement("div");
+astroOverlay.style.cssText = `
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  overflow:hidden;
+  z-index:4;
+`;
+
+document.body.appendChild(astroOverlay);
+
+function crearAstro(tipo) {
+  const elemento = document.createElement("div");
+
+  const sol = tipo === "sol";
+
+  elemento.style.cssText = `
+    position:absolute;
+    width:${sol ? 58 : 44}px;
+    height:${sol ? 58 : 44}px;
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+    pointer-events:none;
+    display:none;
+  `;
+
+  if (sol) {
+    elemento.style.background =
+      "radial-gradient(circle at 35% 30%," +
+      "#fff 0%,#fff8bd 25%,#ffd24c 55%,#ff9c00 100%)";
+
+    elemento.style.boxShadow =
+      "0 0 18px 7px #ffce5b99," +
+      "0 0 45px 14px #ffb02b55";
+  } else {
+    elemento.style.background =
+      "radial-gradient(circle at 30% 25%," +
+      "#d8f4ff 0%,#70baf5 18%," +
+      "#3484ce 55%,#17447b 100%)";
+
+    elemento.style.boxShadow =
+      "0 0 15px 4px #5da9ed66";
+
+    // Continentes ilustrativos, no cartografía real.
+    elemento.innerHTML = `
+      <div style="
+        position:absolute;
+        left:18%;
+        top:27%;
+        width:35%;
+        height:25%;
+        background:#73c89b;
+        border-radius:45% 30% 60% 25%;
+        transform:rotate(25deg);
+      "></div>
+      <div style="
+        position:absolute;
+        right:15%;
+        bottom:18%;
+        width:24%;
+        height:39%;
+        background:#82cf9f;
+        border-radius:50% 25% 55% 35%;
+        transform:rotate(-20deg);
+      "></div>
+    `;
+  }
+
+  astroOverlay.appendChild(elemento);
+  return elemento;
+}
+
+const astrosV5 = {
+  sol: crearAstro("sol"),
+  tierra: crearAstro("tierra"),
+  datos: null,
+  clave: "",
+  solicitud: 0
+};
+
+// Convertir azimut y elevación locales a la orientación
+// de la proyección polar lunar del visor.
+// Azimut: 0° norte, 90° este.
+
+// Base local para el mapa polar estereográfico.
+// Coordenadas: X este cartográfico, Z sur cartográfico.
+function vectorAstronomicoV5(elevacion, azimut, lon) {
+  const r = Math.PI / 180;
+  const el = elevacion * r;
+  const az = azimut * r;
+  const l = lon * r;
+
+  const este = Math.cos(el) * Math.sin(az);
+  const norte = Math.cos(el) * Math.cos(az);
+  const arriba = Math.sin(el);
+
+  return new THREE.Vector3(
+    este * Math.cos(l) + norte * Math.sin(l),
+    arriba,
+    este * Math.sin(l) - norte * Math.cos(l)
+  ).normalize();
+}
+
+async function consultarAstrosV5() {
+  if (!terrainData || !surfaceMode) return;
+
+  const lugar = mapToLunar(
+    camera.position.x,
+    camera.position.z
+  );
+
+  const fecha = simulationTime.toISOString();
+  const lat = lugar.lat.toFixed(4);
+  const lon = lugar.lon.toFixed(4);
+  const clave = fecha + "|" + lat + "|" + lon;
+
+  if (clave === astrosV5.clave) return;
+
+  astrosV5.clave = clave;
+  const solicitud = ++astrosV5.solicitud;
+
+  try {
+    const params = new URLSearchParams({
+      fecha, lat, lon
+    });
+
+    const respuesta = await fetch(
+      "/api/cielo?" + params
+    );
+
+    if (!respuesta.ok) {
+      throw Error("HTTP " + respuesta.status);
+    }
+
+    const datos = await respuesta.json();
+
+    if (solicitud !== astrosV5.solicitud) return;
+
+    astrosV5.datos = datos;
+
+  } catch (error) {
+    if (solicitud !== astrosV5.solicitud) return;
+
+    astrosV5.clave = "";
+    astrosV5.datos = null;
+    console.warn("Astros NASA:", error);
+  }
+}
+
+function proyectarAstroV5(elemento, datos, lon) {
+  elemento.style.display = "none";
+
+  if (!datos) return;
+
+  const elevacion = Number(datos.elevacion_grados);
+  const azimut = Number(datos.azimut_grados);
+
+  if (!Number.isFinite(elevacion) ||
+      !Number.isFinite(azimut) ||
+      elevacion < 0) return;
+
+  const direccion = vectorAstronomicoV5(
+    elevacion, azimut, lon
+  );
+
+  // Proyectar un punto distante sobre la cámara.
+  const punto = camera.position.clone().addScaledVector(
+    direccion, 100
+  );
+
+  camera.updateMatrixWorld();
+
+  // Comprobar si el astro está delante de la cámara.
+  const local = punto.clone();
+  camera.worldToLocal(local);
+
+  if (local.z >= 0) return;
+
+  punto.project(camera);
+
+  if (!Number.isFinite(punto.x) ||
+      !Number.isFinite(punto.y) ||
+      Math.abs(punto.x) > 1 ||
+      Math.abs(punto.y) > 1) return;
+
+  elemento.style.left =
+    ((punto.x + 1) * 50) + "%";
+
+  elemento.style.top =
+    ((1 - punto.y) * 50) + "%";
+
+  elemento.style.display = "block";
+}
+
+function dibujarAstrosV5() {
+  if (!surfaceMode || !astrosV5.datos) {
+    astrosV5.sol.style.display = "none";
+    astrosV5.tierra.style.display = "none";
+    return;
+  }
+
+  const lugar = mapToLunar(
+    camera.position.x,
+    camera.position.z
+  );
+
+  proyectarAstroV5(
+    astrosV5.sol,
+    astrosV5.datos.sol,
+    lugar.lon
+  );
+
+  proyectarAstroV5(
+    astrosV5.tierra,
+    astrosV5.datos.tierra,
+    lugar.lon
+  );
+}
+
+// Independiente del renderizado de la Luna.
+setInterval(consultarAstrosV5, 1500);
+setInterval(dibujarAstrosV5, 50);
+
+
+// LUNAR_EARTH_LINK_V1
+// Visibilidad geométrica de la Tierra con NASA/JPL SPICE.
+// No implica que exista un enlace de radio operativo.
+
+const earthLinkPanel = document.createElement("div");
+
+earthLinkPanel.style.cssText = `
+  position:fixed;
+  right:18px;
+  bottom:18px;
+  width:260px;
+  max-width:calc(100vw - 50px);
+  background:#101723f2;
+  color:#ffffff;
+  border:1px solid #526580;
+  border-radius:12px;
+  padding:14px;
+  box-sizing:border-box;
+  font:12px/1.6 Arial,sans-serif;
+  z-index:12;
+`;
+
+earthLinkPanel.innerHTML = `
+  <div style="font-size:15px;font-weight:bold">
+    📡 EARTH LINK
+  </div>
+  <div style="color:#aebdd0;font-size:11px">
+    Visibilidad geométrica · NASA/JPL SPICE
+  </div>
+  <div id="earthLinkContent" style="margin-top:10px">
+    Esperando coordenadas...
+  </div>
+  <div style="
+    color:#aebdd0;
+    font-size:10px;
+    border-top:1px solid #344256;
+    margin-top:10px;
+    padding-top:8px
+  ">
+    No considera montañas, antenas ni satélites repetidores.
+  </div>
+`;
+
+document.body.appendChild(earthLinkPanel);
+
+const earthLinkContent =
+  document.getElementById("earthLinkContent");
+
+let earthLinkLastKey = "";
+let earthLinkRequestId = 0;
+
+function earthLinkNumber(value, decimals=2) {
+  const n = Number(value);
+  return Number.isFinite(n)
+    ? n.toFixed(decimals)
+    : "—";
+}
+
+async function updateEarthLink() {
+  if (!terrainData) return;
+
+  const x = surfaceMode
+    ? camera.position.x
+    : controls.target.x;
+
+  const z = surfaceMode
+    ? camera.position.z
+    : controls.target.z;
+
+  const lunar = mapToLunar(x,z);
+  const fecha = simulationTime.toISOString();
+
+  const lat = lunar.lat.toFixed(4);
+  const lon = lunar.lon.toFixed(4);
+
+  const key = fecha + "|" + lat + "|" + lon;
+
+  if (key === earthLinkLastKey) return;
+
+  earthLinkLastKey = key;
+  const requestId = ++earthLinkRequestId;
+
+  earthLinkContent.textContent =
+    "Calculando visibilidad terrestre...";
+
+  try {
+    const params = new URLSearchParams({
+      fecha,
+      lat,
+      lon
+    });
+
+    const response = await fetch(
+      "/api/cielo?" + params
+    );
+
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status);
+    }
+
+    const data = await response.json();
+
+    if (requestId !== earthLinkRequestId) return;
+
+    const earth = data.tierra;
+    const elevation = Number(earth.elevacion_grados);
+    const azimuth = Number(earth.azimut_grados);
+    const distance = Number(earth.distancia_km);
+
+    if (!Number.isFinite(elevation)) {
+      throw new Error("Elevación terrestre inválida");
+    }
+
+    const visible = elevation > 0;
+
+    const color = visible ? "#69e6ae" : "#ffbf70";
+
+    const status = visible
+      ? "TIERRA SOBRE EL HORIZONTE"
+      : elevation < 0
+        ? "TIERRA BAJO EL HORIZONTE"
+        : "TIERRA EN EL HORIZONTE";
+
+    earthLinkContent.innerHTML = `
+      <div style="
+        color:${color};
+        font-weight:bold;
+        margin-bottom:8px;
+      ">
+        ${visible ? "●" : "○"} ${status}
+      </div>
+
+      <div>
+        Elevación terrestre:
+        <b>${earthLinkNumber(elevation)}°</b>
+      </div>
+
+      <div>
+        Azimut:
+        <b>${earthLinkNumber(azimuth)}°</b>
+      </div>
+
+      <div>
+        Distancia:
+        <b>${Number.isFinite(distance)
+          ? Math.round(distance).toLocaleString("es-AR")
+          : "—"} km</b>
+      </div>
+
+      <div style="
+        margin-top:8px;
+        color:#aebdd0;
+        font-size:11px;
+      ">
+        Lat ${lat}° · Lon ${lon}°
+      </div>
+
+      <div style="
+        margin-top:8px;
+        color:${color};
+      ">
+        ${visible
+          ? "Posible línea de visión geométrica."
+          : "Sin línea de visión geométrica directa."}
+      </div>
+    `;
+
+  } catch (error) {
+    if (requestId !== earthLinkRequestId) return;
+
+    earthLinkLastKey = "";
+
+    earthLinkContent.textContent =
+      "No se pudo consultar SPICE: " + error.message;
+  }
+}
+
+// Actualización independiente del visor 3D.
+setInterval(updateEarthLink, 1500);
+
 </script>
+
+
+
 </body>
 </html>
