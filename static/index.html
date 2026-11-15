@@ -32,8 +32,38 @@ padding:10px;border-radius:8px;font-size:12px}
 </div>
 <label>Exageración vertical: <span id="scaleLabel">3×</span></label>
 <input id="scale" type="range" min="1" max="15" step="0.5" value="3">
+<div style="margin-top:12px;padding-top:10px;border-top:1px solid #344256">
+  <strong style="font-size:13px">📍 Buscar coordenadas lunares</strong>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <input id="latitude" type="number" value="-89" min="-90" max="-80"
+      step="0.001" placeholder="Latitud"
+      style="width:50%;box-sizing:border-box;background:#172236;color:white;
+      border:1px solid #526580;border-radius:6px;padding:8px">
+    <input id="longitude" type="number" value="0" min="-180" max="180"
+      step="0.001" placeholder="Longitud"
+      style="width:50%;box-sizing:border-box;background:#172236;color:white;
+      border:1px solid #526580;border-radius:6px;padding:8px">
+  </div>
+  <button id="goLocation">Ir a ubicación</button>
+  <small style="display:block">Latitud sur · Longitud positiva hacia el este</small>
+</div>
+<div id="timePanel" style="margin-top:12px;padding-top:10px;border-top:1px solid #344256">
+  <strong style="font-size:13px">🕒 Fecha y hora lunar (UTC)</strong>
+  <input id="lunarTime" type="datetime-local"
+    step="60"
+    style="margin-top:8px;box-sizing:border-box;background:#172236;
+    color:white;border:1px solid #526580;border-radius:6px;padding:8px">
+  <div style="display:flex;flex-wrap:wrap">
+    <button id="timeBack">−1 hora</button>
+    <button id="timeForward">+1 hora</button>
+    <button id="timeNow">Ahora</button>
+  </div>
+  <small id="timeInfo" style="display:block">
+    Control temporal UTC. Iluminación astronómica pendiente.
+  </small>
+</div>
 <p id="status">Cargando datos científicos...</p>
-<small>Orbital: mouse para explorar · Superficie: WASD + arrastrar para mirar</small>
+<small>Orbital: mouse para explorar · Superficie: WASD para avanzar · Arrastrar para girar 360°</small>
 </div>
 <div id="coords">Esperando terreno...</div>
 
@@ -161,7 +191,7 @@ let pitch = 0;
 let dragging = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
-let eyeHeight = 0.0017;
+let eyeHeight = 0.010;
 const keys = new Set();
 const clock = new THREE.Clock();
 
@@ -189,12 +219,56 @@ function updateSurfaceLook(){
   camera.rotation.x=pitch;
 }
 
+// Marcador de coordenadas seleccionadas.
+let selectedLocation = null;
+
+const locationMarker = new THREE.Group();
+
+const markerSphere = new THREE.Mesh(
+  new THREE.SphereGeometry(0.7,16,12),
+  new THREE.MeshBasicMaterial({
+    color:0x00e5ff,
+    depthTest:false
+  })
+);
+markerSphere.renderOrder=10;
+locationMarker.add(markerSphere);
+
+const markerRing = new THREE.Mesh(
+  new THREE.RingGeometry(1.0,1.3,48),
+  new THREE.MeshBasicMaterial({
+    color:0x00e5ff,
+    side:THREE.DoubleSide,
+    transparent:true,
+    opacity:0.9,
+    depthTest:false
+  })
+);
+markerRing.rotation.x=-Math.PI/2;
+markerRing.renderOrder=10;
+locationMarker.add(markerRing);
+
+locationMarker.visible=false;
+scene.add(locationMarker);
+
+function updateLocationMarker(){
+  if(!selectedLocation || !terrainData)return;
+
+  const {x,z}=selectedLocation;
+  locationMarker.position.set(
+    x,groundHeight(x,z)+0.05,z
+  );
+  locationMarker.visible=true;
+}
+
 function enterSurface(){
   if(!terrainData)return;
   surfaceMode=true;
   controls.enabled=false;
   keys.clear();
-  camera.position.set(0,groundHeight(0,0)+eyeHeight,0);
+  const x=selectedLocation?selectedLocation.x:0;
+  const z=selectedLocation?selectedLocation.z:0;
+  camera.position.set(x,groundHeight(x,z)+eyeHeight,z);
   yaw=0;
   pitch=0;
   updateSurfaceLook();
@@ -208,11 +282,76 @@ function enterOrbit(){
   keys.clear();
   controls.enabled=true;
   camera.position.set(110,130,150);
-  controls.target.set(0,0,0);
+  const x=selectedLocation?selectedLocation.x:0;
+  const z=selectedLocation?selectedLocation.z:0;
+  const y=groundHeight(x,z);
+
+  controls.target.set(x,y,z);
+  camera.position.set(x+45,y+65,z+55);
   camera.up.set(0,1,0);
   controls.update();
   status.textContent='Vista orbital NASA LOLA + LROC';
 }
+
+
+// Proyección polar estereográfica lunar IAU:30135.
+// Radio de la Luna: 1.737.400 m.
+// Latitud de origen: -90°; meridiano central: 0°.
+function mapToLunar(x,z){
+  const R=1737400;
+  const xm=x*1000;
+  const ym=-z*1000;
+  const rho=Math.hypot(xm,ym);
+  const lat=(2*Math.atan(rho/(2*R))-Math.PI/2)*180/Math.PI;
+  let lon=Math.atan2(xm,ym)*180/Math.PI;
+  if(rho<0.000001)lon=0;
+  return {lat,lon};
+}
+
+function lunarToMap(lat,lon){
+  const rad=Math.PI/180;
+  const R=1737400;
+  const phi=lat*rad;
+  const lambda=lon*rad;
+  const rho=2*R*Math.tan(Math.PI/4+phi/2);
+  const x=rho*Math.sin(lambda)/1000;
+  const y=rho*Math.cos(lambda)/1000;
+  return {x,z:-y};
+}
+
+document.getElementById('goLocation').onclick=()=>{
+  if(!terrainData){
+    status.textContent='Esperá a que cargue el terreno.';
+    return;
+  }
+
+  const lat=Number(document.getElementById('latitude').value);
+  const lon=Number(document.getElementById('longitude').value);
+
+  if(!Number.isFinite(lat)||!Number.isFinite(lon)||
+     lat < -90 || lat > -80 || lon < -180 || lon > 180){
+    status.textContent='Coordenadas inválidas.';
+    return;
+  }
+
+  const pos=lunarToMap(lat,lon);
+
+  if(Math.abs(pos.x)>=extentX/2-0.01 ||
+     Math.abs(pos.z)>=extentY/2-0.01){
+    status.textContent='Ubicación fuera del mapa LOLA disponible.';
+    return;
+  }
+
+  selectedLocation={x:pos.x,z:pos.z,lat,lon};
+  updateLocationMarker();
+  enterSurface();
+  camera.position.x=pos.x;
+  camera.position.z=pos.z;
+  camera.position.y=groundHeight(pos.x,pos.z)+eyeHeight;
+
+  status.textContent=
+    'Ubicación: '+lat.toFixed(3)+'° / '+lon.toFixed(3)+'°';
+};
 
 document.getElementById('orbit').onclick=enterOrbit;
 document.getElementById('surface').onclick=enterSurface;
@@ -226,7 +365,12 @@ renderer.domElement.addEventListener('pointerdown',e=>{
 });
 
 renderer.domElement.addEventListener('pointermove',e=>{
-  if(!surfaceMode || !dragging)return;
+  if(!surfaceMode)return;
+  if(!dragging){
+    lastMouseX=e.clientX;
+    lastMouseY=e.clientY;
+    return;
+  }
   yaw-=(e.clientX-lastMouseX)*0.003;
   pitch-=(e.clientY-lastMouseY)*0.003;
   pitch=THREE.MathUtils.clamp(pitch,-1.45,1.45);
@@ -324,7 +468,52 @@ document.getElementById('scale').oninput=e=>{
     camera.position.y=groundHeight(
       camera.position.x,camera.position.z)+eyeHeight;
   }
+  updateLocationMarker();
 };
+
+// Tiempo de simulación expresado en UTC.
+let simulationTime = new Date();
+
+const lunarTimeInput = document.getElementById('lunarTime');
+const timeInfo = document.getElementById('timeInfo');
+
+function formatUTCInput(date){
+  return date.toISOString().slice(0,16);
+}
+
+function updateTimeDisplay(){
+  lunarTimeInput.value=formatUTCInput(simulationTime);
+  timeInfo.textContent=
+    'UTC: '+simulationTime.toISOString().replace('T',' ').slice(0,19)+
+    ' · Iluminación astronómica pendiente';
+}
+
+lunarTimeInput.addEventListener('change',()=>{
+  const value=lunarTimeInput.value;
+  const date=new Date(value+'Z');
+
+  if(!Number.isNaN(date.getTime())){
+    simulationTime=date;
+    updateTimeDisplay();
+  }
+});
+
+document.getElementById('timeBack').onclick=()=>{
+  simulationTime=new Date(simulationTime.getTime()-3600000);
+  updateTimeDisplay();
+};
+
+document.getElementById('timeForward').onclick=()=>{
+  simulationTime=new Date(simulationTime.getTime()+3600000);
+  updateTimeDisplay();
+};
+
+document.getElementById('timeNow').onclick=()=>{
+  simulationTime=new Date();
+  updateTimeDisplay();
+};
+
+updateTimeDisplay();
 
 function animate(){
   requestAnimationFrame(animate);
@@ -339,11 +528,12 @@ function animate(){
   if(terrainData){
     const x=surfaceMode?camera.position.x:controls.target.x;
     const z=surfaceMode?camera.position.z:controls.target.z;
+    const lunar=mapToLunar(x,z);
     coords.textContent=
-      'X: '+x.toFixed(3)+' km | Y: '+
-      (-z).toFixed(3)+' km | Elevación relativa: '+
+      'Lat: '+lunar.lat.toFixed(5)+'° | Lon: '+
+      lunar.lon.toFixed(5)+'° | Elevación relativa: '+
       (groundHeight(x,z)/verticalScale*1000).toFixed(1)+' m'+
-      (surfaceMode?' | Modo superficie':' | Modo orbital');
+      (surfaceMode?' | Superficie':' | Orbital');
   }
 
   renderer.render(scene,camera);
@@ -361,6 +551,77 @@ loadTerrain().catch(error=>{
 });
 
 animate();
+
+
+// LUNAR_SOL_SPICE_V1
+// Iluminación basada en la dirección NASA/JPL SPICE IAU_MOON.
+// Coordenadas del visor: X este, Y arriba, Z sur cartográfico.
+
+let ultimaConsultaSolar = 0;
+
+async function actualizarSolNASA() {
+    const consulta = ++ultimaConsultaSolar;
+
+    try {
+        const fecha = simulationTime.toISOString();
+        const respuesta = await fetch(
+            "/api/sol?fecha=" + encodeURIComponent(fecha)
+        );
+
+        if (!respuesta.ok) {
+            throw new Error("Servicio solar: " + respuesta.status);
+        }
+
+        const datos = await respuesta.json();
+
+        if (consulta !== ultimaConsultaSolar) return;
+
+        const [x, y, z] = datos.direccion_iau_moon;
+
+        // Transformación del sistema lunar al plano polar del visor.
+        const direccion = new THREE.Vector3(
+            y,
+            -z,
+            -x
+        ).normalize();
+
+        sun.position.copy(
+            direccion.multiplyScalar(1000)
+        );
+
+        sun.target.position.set(0, 0, 0);
+        sun.target.updateMatrixWorld();
+
+        console.log(
+            "Sol NASA/JPL:",
+            datos.fecha_utc,
+            "altura polo sur:",
+            datos.altura_polo_sur_grados.toFixed(3) + "°"
+        );
+
+    } catch (error) {
+        console.warn("No se pudo actualizar el Sol:", error);
+    }
+}
+
+// Detectar cambios del selector temporal sin modificar sus controles.
+let ultimaFechaSolar = "";
+
+setInterval(() => {
+    if (
+        typeof simulationTime !== "undefined" &&
+        simulationTime instanceof Date &&
+        !isNaN(simulationTime.getTime())
+    ) {
+        const fecha = simulationTime.toISOString();
+
+        if (fecha !== ultimaFechaSolar) {
+            ultimaFechaSolar = fecha;
+            actualizarSolNASA();
+        }
+    }
+}, 500);
+
 </script>
 </body>
 </html>
